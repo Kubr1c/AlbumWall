@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AlbumWall v3</title>
+<link rel="preload" as="image" href="flip-background.png">
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#090a0b}
+body{display:grid;place-items:center}#wall{position:relative;display:grid;justify-content:center;align-content:center}
+body::after{content:"";position:fixed;inset:0;z-index:5;pointer-events:none;background:radial-gradient(ellipse at center,transparent 48%,rgba(0,0,0,var(--edge-fade,0)) 100%)}
+.line-window{position:absolute;overflow:hidden;z-index:4;background:#090a0b;pointer-events:none}.line-track{position:absolute;display:flex;will-change:transform}.line-cell{position:relative;flex:none;padding:calc(var(--gap,2px)/2)}.line-cell img{display:block;width:100%;height:100%;object-fit:cover}
+.slide-out{position:absolute;z-index:3;overflow:hidden;pointer-events:none;will-change:transform}.slide-out img{display:block;width:100%;height:100%;object-fit:cover}
+.tile{position:relative;perspective:1100px;overflow:hidden;isolation:isolate}.card{position:absolute;inset:calc(var(--gap,2px)/2);transform-style:preserve-3d}
+.tile::before{content:"";position:absolute;inset:calc(var(--gap,2px)/2);z-index:0;pointer-events:none;background:#ffcb2d url("flip-background.png") center / contain no-repeat}
+.card{z-index:1}
+.flip-panel{position:absolute;inset:calc(var(--gap,2px)/2);z-index:2;pointer-events:none;backface-visibility:hidden;-webkit-backface-visibility:hidden;will-change:transform;background:#111}.flip-panel img{display:block;width:100%;height:100%;object-fit:cover}
+.card.push{overflow:hidden;transform-style:flat}
+.face{position:absolute;inset:0;backface-visibility:hidden;-webkit-backface-visibility:hidden;overflow:hidden;background:#111}
+.settled-cover{position:absolute;inset:calc(var(--gap,2px)/2);z-index:3;overflow:hidden;background:#111;pointer-events:none}.settled-cover img{display:block;width:100%;height:100%;object-fit:cover}
+.face img{display:block;width:100%;height:100%;object-fit:cover}.back{transform:rotateY(180deg)}
+.card.vertical.flip3d .back{transform:rotateX(180deg)}
+.card.moving{will-change:transform;transition:transform var(--duration,870ms) cubic-bezier(.42,.02,.21,.99)}
+.card.moving.flip3d.horizontal{transform:rotateY(180deg)}.card.moving.flip3d.vertical{transform:rotateX(180deg)}
+#hover-layer{position:fixed;inset:0;z-index:2;pointer-events:none;opacity:0;transition:opacity 380ms ease-out}
+#hover-ring{position:fixed;z-index:0;pointer-events:none;visibility:hidden;transform-origin:center;border:2px solid rgba(255,255,255,.9);animation:hover-breathe 2.8s ease-in-out infinite}@keyframes hover-breathe{0%,100%{box-shadow:inset 0 0 8px rgba(255,255,255,.2);opacity:.45}50%{box-shadow:inset 0 0 23px rgba(255,255,255,.5);opacity:1}}
+#status{color:#bbb;font:14px/1.7 system-ui;text-align:center;position:fixed;bottom:18px;pointer-events:none}
+#toast{color:#fff;font:14px/1.5 system-ui;text-align:center;position:fixed;left:50%;bottom:24px;transform:translateX(-50%);padding:8px 14px;border-radius:18px;background:rgba(0,0,0,.72);opacity:0;transition:opacity .2s;pointer-events:none;z-index:10}
+</style></head><body><main id="wall" aria-label="专辑封面墙"></main><div id="status"></div>
+<div id="toast" aria-live="polite"></div><div id="hover-layer" aria-hidden="true"><div id="hover-ring"></div></div>
+<script src="covers.js"></script><script>
+(()=>{'use strict';
+const wall=document.getElementById('wall'),status=document.getElementById('status'),toast=document.getElementById('toast');
+const config={rows:5,interval:2800,duration:870,gap:2,transitionRatio:.25,quiet:false,edgeFade:0,direction:'random',effect:'randomAll'};
+let source=[],tiles=[],paused=false,timer,revision='',folder='',generation=0,resizeTimer;
+const directory=new Map(),reserved=new Set(),bad=new Set(),lastShown=new Map();
+let sequence=0,lastTile=null,roundRunning=false;
+const hoverRing=document.getElementById('hover-ring'),hoverLayer=document.getElementById('hover-layer'),activeAnimations=new Set();
+function trackAnimation(animation,participants){
+ const entry={animation,participants};activeAnimations.add(entry);
+ const remove=()=>activeAnimations.delete(entry);animation.finished.then(remove,remove);
+ return animation;
+}
+function hoverTile(t,hovered){
+ t.hovered=hovered;
+ // Keep one permanent overlay; never reparent or restart its breathing clock.
+ if(hovered)drawHoverRing();
+}
+let hoverFrame=0;
+function drawHoverRing(){
+ cancelAnimationFrame(hoverFrame);hoverFrame=0;
+ let t=hoveredTile;if(!t||!t.tile.isConnected){hoverRing.style.visibility='hidden';return;}
+ const active=hoverTarget?.isConnected&&(hoverTarget===t.tile||hoverTarget===t.flipPanel||hoverTarget===t.hoverSurface||
+  (t.pushAnimations?.length&&(hoverTarget===t.front||hoverTarget===t.back))||hoverTarget===t.slideAnimation?.effect?.target);
+ if(!active){
+  if(hoverCover){
+   const destination=tiles.find(candidate=>candidate.url===hoverCover);
+   if(!destination){clearHover();return;}
+   if(destination!==t){t.hovered=false;destination.hovered=true;hoveredTile=destination;t=destination;}
+   hoverCover=null;
+  }
+  hoverTarget=t.tile;
+  hoverRing.style.transition='left 120ms ease-out, top 120ms ease-out, width 120ms ease-out, height 120ms ease-out';
+ }
+ const host=hoverTarget||t.tile,flip=host===t.flipPanel;
+ // Mirror the cover's clipping and stack level without reparenting the ring.
+ // A translating face must not expose its outline outside the tile window.
+ const clipHost=host.closest('.line-window')||host.closest('.tile');
+ const clip=clipHost?clipHost.getBoundingClientRect():{left:0,top:0,right:innerWidth,bottom:innerHeight};
+ hoverLayer.style.clipPath=`polygon(${clip.left}px ${clip.top}px,${clip.right}px ${clip.top}px,${clip.right}px ${clip.bottom}px,${clip.left}px ${clip.bottom}px)`;
+ hoverLayer.style.zIndex=host.closest('.line-window')?'4':host.classList.contains('slide-out')?'3':'2';
+ const rect=(flip?t.tile:host).getBoundingClientRect();
+ const inset=host===t.tile||flip||host.classList.contains('line-cell')?config.gap/2:0;
+ Object.assign(hoverRing.style,{visibility:'visible',left:(rect.left+inset)+'px',top:(rect.top+inset)+'px',width:Math.max(0,rect.width-inset*2)+'px',height:Math.max(0,rect.height-inset*2)+'px',
+  transform:flip?'perspective(1100px) '+getComputedStyle(host).transform:'none'});
+ hoverFrame=requestAnimationFrame(drawHoverRing);
+}
+// Desktop web hosts may forward legacy mouse events without Pointer Events.
+// Resolve the grid from coordinates so animated overlays cannot steal hover.
+let hoveredTile=null,hoverTarget=null,hoverCover=null,lastPointer=null,hoverRevealTimer;
+function updateHover(event){
+ if(lastPointer&&lastPointer.x===event.clientX&&lastPointer.y===event.clientY){if(hoveredTile)drawHoverRing();return;}
+ lastPointer={x:event.clientX,y:event.clientY};
+ hoverRing.style.transition='none';
+ const rect=wall.getBoundingClientRect(),size=tiles[0]?.tile.offsetWidth;
+ const cols=Number(wall.style.gridTemplateColumns.match(/repeat\((\d+)/)?.[1])||0;
+ const col=Math.floor((event.clientX-rect.left)/size),row=Math.floor((event.clientY-rect.top)/size);
+ let next=size&&col>=0&&col<cols&&row>=0&&event.clientY<rect.bottom?tiles[row*cols+col]||null:null;
+ // Hit-test visible animated surfaces instead of their original grid cells.
+ // Lock immediately, but reveal only after a short dwell to ignore fly-by movement.
+ let target=next?.tile||null,priority=-1;
+ const hit=element=>{if(!element?.isConnected)return false;const r=element.getBoundingClientRect();return event.clientX>=r.left&&event.clientX<r.right&&event.clientY>=r.top&&event.clientY<r.bottom;};
+ for(const t of tiles){
+  const surfaces=t.hoverSurface?[[t.hoverSurface,4]]:t.flipPanel?[[t.flipPanel,2]]:t.pushAnimations?.length?[[t.front,1],[t.back,2]]:t.slideAnimation?[[t.slideAnimation.effect?.target,3]]:[];
+  for(const [element,layer] of surfaces)if(layer>=priority&&hit(element)){next=t;target=element;priority=layer;}
+ }
+ hoverTarget=target;
+ // Preserve the identity of the moving artwork across its destination commit.
+ hoverCover=target&&target!==next?.tile?(target===next.flipPanel?next.second.src:target.querySelector('img')?.src||next.url):null;
+ if(next!==hoveredTile){
+  clearTimeout(hoverRevealTimer);
+  hoverLayer.style.transition='none';hoverLayer.style.opacity='0';
+  hoverLayer.getBoundingClientRect();hoverLayer.style.transition='opacity 380ms ease-out';
+  if(next)hoverRevealTimer=setTimeout(()=>{if(hoveredTile)hoverLayer.style.opacity='1';},80);
+  if(hoveredTile)hoverTile(hoveredTile,false);
+  hoveredTile=next;
+  if(next)hoverTile(next,true);
+ }else if(next)drawHoverRing();
+ if(!next)hoverRing.style.visibility='hidden';
+
+}
+function clearHover(){clearTimeout(hoverRevealTimer);hoverLayer.style.opacity='0';if(hoveredTile)hoverTile(hoveredTile,false);hoveredTile=null;hoverTarget=null;hoverCover=null;lastPointer=null;cancelAnimationFrame(hoverFrame);hoverFrame=0;hoverRing.style.visibility='hidden';}
+addEventListener('mousemove',updateHover,{passive:true});
+addEventListener('pointermove',updateHover,{passive:true});
+addEventListener('blur',clearHover);
+document.documentElement.addEventListener('mouseleave',clearHover);
+function appearance(){
+ document.documentElement.style.setProperty('--gap',config.gap+'px');
+ document.documentElement.style.setProperty('--edge-fade',(config.edgeFade/100*.72).toFixed(2));
+}
+const clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
+const basename=url=>decodeURIComponent(url.split('/').pop().split('?')[0]);
+const fileUrl=p=>p.startsWith('file:')?p:'file:///'+p.replace(/\\/g,'/').split('/').map((s,i)=>i===0?s:encodeURIComponent(s)).join('/');
+function shuffled(list){const a=[...list];for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}return a}
+function applyLibrary(){
+ const library=window.albumWallLibrary||{files:[],revision:''};
+ const allowed=new Set(library.files.map(basename));
+ let next=library.files.map(p=>new URL(p,document.baseURI).href);
+ if(directory.size){const selected=[...directory.entries()].filter(([name])=>allowed.has(basename(name))).map(([,url])=>url);if(selected.length)next=selected;}
+ next=[...new Set(next)].filter(p=>!bad.has(p));
+ const changed=next.length!==source.length||next.some((p,i)=>p!==source[i]);
+ source=next;revision=library.revision;
+ if(changed)render();
+}
+function makeTile(url){
+ const tile=document.createElement('div');tile.className='tile';
+ const card=document.createElement('div');card.className='card';
+ const front=document.createElement('div'),back=document.createElement('div');front.className='face';back.className='face back';
+ const first=new Image(),second=new Image();first.alt=second.alt='';first.decoding=second.decoding='async';first.src=second.src=url;
+ first.onerror=()=>{bad.add(first.src);applyLibrary()};
+ front.append(first);back.append(second);card.append(front,back);tile.append(card);wall.append(tile);
+ const t={tile,card,front,back,first,second,url,busy:false,hovered:false};
+ return t;
+}
+function render(){
+ for(const entry of activeAnimations)entry.animation.cancel();activeAnimations.clear();hoverRing.style.visibility='hidden';
+ hoveredTile=null;hoverTarget=null;hoverCover=null;lastPointer=null;generation++;reserved.clear();wall.replaceChildren();tiles=[];
+ if(!source.length){status.textContent='暂无可用专辑封面 · 请运行 update.cmd';return}
+ status.textContent='';
+ let rows=Math.min(config.rows,source.length);
+ const size=Math.max(1,Math.floor(innerHeight/rows));
+ // Match the former edge-to-edge wall: center a slightly oversized grid so
+ // partial outer tiles fill the left/right edges instead of leaving margins.
+ let cols=Math.ceil(innerWidth/size)+1;
+ cols=Math.max(1,Math.min(cols,Math.floor(source.length/rows)));
+ wall.style.gridTemplateColumns=`repeat(${cols},${size}px)`;wall.style.gridTemplateRows=`repeat(${rows},${size}px)`;
+ wall.style.width=`${cols*size}px`;wall.style.height=`${rows*size}px`;
+ document.documentElement.style.setProperty('--gap',config.gap+'px');document.documentElement.style.setProperty('--duration',config.duration+'ms');
+ document.documentElement.style.setProperty('--edge-fade',(config.edgeFade/100*.72).toFixed(2));
+ tiles=shuffled(source).slice(0,rows*cols).map(makeTile);
+ for(const t of tiles)lastShown.set(t.url,++sequence);lastTile=null;
+}
+const painted=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+async function turnCard(t,next,token,direction,duration){
+ // Rotate a single surface: two coplanar front/back textures can flicker in
+ // Chromium's compositor. Swap decoded images only while the panel is edge-on.
+ const panel=document.createElement('div');panel.className='flip-panel';
+ const outgoing=new Image(),incoming=new Image();outgoing.src=t.url;incoming.src=next;
+ await Promise.all([outgoing.decode(),incoming.decode()]);
+ if(token!==generation||!t.tile.isConnected)return;
+ panel.append(outgoing);t.tile.append(panel);t.flipPanel=panel;
+ await painted();
+ if(token!==generation||!t.tile.isConnected)return;
+ t.card.style.visibility='hidden';
+ const rotate=angle=>`${direction==='vertical'?'rotateX':'rotateY'}(${angle}deg)`;
+ const first=panel.animate([{transform:rotate(0)},{transform:rotate(90)}],{duration:duration/2,easing:'ease-in',fill:'both'});
+ t.flipAnimation=first;trackAnimation(first,[t]);await first.finished;
+ if(token!==generation||!t.tile.isConnected)return;
+ panel.replaceChildren(incoming);panel.style.transform=rotate(-90);first.cancel();
+ const second=panel.animate([{transform:rotate(-90)},{transform:rotate(0)}],{duration:duration/2,easing:'ease-out',fill:'both'});
+ t.flipAnimation=second;trackAnimation(second,[t]);await second.finished;
+ if(token!==generation||!t.tile.isConnected)return;
+ t.first.src=next;await t.first.decode();
+ if(token!==generation||!t.tile.isConnected)return;
+ t.card.style.visibility='';
+ // Keep the final panel painted until the stationary cover is ready beneath it.
+ await painted();
+ panel.remove();second.cancel();t.flipPanel=null;t.flipAnimation=null;
+}
+async function settleFlip(t,next,token){
+ // Keep the decoded incoming image painted outside the 3D stacking context
+ // while the card returns to its neutral orientation.
+ const cover=document.createElement('div');cover.className='settled-cover';
+ t.settleCover=cover;
+ t.back.removeChild(t.second);cover.append(t.second);t.tile.append(cover);
+ await painted();
+ if(token!==generation||!t.tile.isConnected)return;
+ t.first.src=next;await t.first.decode();
+ if(token!==generation||!t.tile.isConnected)return;
+ t.card.style.transition='none';
+ t.pushAnimations?.forEach(animation=>animation.cancel());t.pushAnimations=null;
+ t.front.style.transform='';t.back.style.transform='';t.card.classList.remove('push');
+ t.card.classList.remove('moving','horizontal','vertical','flip3d');
+ await painted();
+ // Force the neutral face into the compositor before uncovering it.
+ t.front.getBoundingClientRect();
+ t.back.append(t.second);cover.remove();t.settleCover=null;
+ t.card.style.transition='';
+}
+async function flip(effectOverride){
+ if(paused||document.hidden||!tiles.length)return;
+ const effect=effectOverride||(config.effect==='random'?shuffled(['flip3d','slide','push','slideOut'])[0]:config.effect);
+ const freeTiles=tiles.filter(t=>!t.busy&&!t.hovered);if(!freeTiles.length)return;
+ let candidates=freeTiles.map(t=>({tile:t,exits:[]}));
+ if(effect==='slideOut'){
+  const cols=Number(wall.style.gridTemplateColumns.match(/repeat\((\d+)/)?.[1])||1;
+  candidates=candidates.map(({tile})=>{
+   const i=tiles.indexOf(tile),exits=[];
+   if(i%cols>0)exits.push({direction:'left',tile:tiles[i-1]});
+   if(i%cols<cols-1&&tiles[i+1])exits.push({direction:'right',tile:tiles[i+1]});
+   if(i-cols>=0)exits.push({direction:'up',tile:tiles[i-cols]});
+   if(i+cols<tiles.length)exits.push({direction:'down',tile:tiles[i+cols]});
+   const allowed=config.direction==='horizontal'?['left','right']:config.direction==='vertical'?['up','down']:['left','right','up','down'];
+   return {tile,exits:exits.filter(x=>allowed.includes(x.direction)&&!x.tile.busy&&!x.tile.hovered)};
+  }).filter(x=>x.exits.length);
+ }
+ if(!candidates.length)return;
+ const visible=new Set(tiles.map(t=>t.url));
+ const free=source.filter(url=>!visible.has(url)&&!reserved.has(url));
+ // With no spare image, retain a static unique grid rather than duplicate it.
+ if(!free.length)return;
+ const eligible=candidates.filter(x=>x.tile!==lastTile);
+ const pool=eligible.length?eligible:candidates;
+ const chosen=pool[Math.floor(Math.random()*pool.length)],t=chosen.tile;
+ const exit=effect==='slideOut'?chosen.exits[Math.floor(Math.random()*chosen.exits.length)]:null;
+ const neighbour=exit?.tile;
+ const oldest=Math.min(...free.map(url=>lastShown.get(url)||0));
+ const leastSeen=free.filter(url=>(lastShown.get(url)||0)===oldest);
+ const next=leastSeen[Math.floor(Math.random()*leastSeen.length)],token=generation,duration=config.duration;
+ lastTile=t;
+ const direction=config.direction==='random'?(Math.random()<.5?'horizontal':'vertical'):config.direction;
+ const slideDirection=exit?.direction||(config.direction==='random'?['left','right','up','down'][Math.floor(Math.random()*4)]:direction==='horizontal'?(['left','right'][Math.floor(Math.random()*2)]):(['up','down'][Math.floor(Math.random()*2)]));
+ let slideOutOverlay=null;
+ t.busy=true;if(neighbour)neighbour.busy=true;reserved.add(next);t.card.style.setProperty('--duration',duration+'ms');
+ try{
+  t.second.src=next;
+  await Promise.race([t.second.decode(),new Promise((_,reject)=>setTimeout(()=>reject(Error('decode timeout')),10000))]);
+  if(token!==generation||paused||!t.tile.isConnected)return;
+  await new Promise(resolve=>requestAnimationFrame(resolve));
+  if(token!==generation||paused||!t.tile.isConnected)return;
+  if(effect==='push'){
+   // Both faces share one animation clock and travel exactly one cover width.
+   // Clipping at the card bounds hides the outgoing face under its neighbour.
+   const [x,y]={left:[-100,0],right:[100,0],up:[0,-100],down:[0,100]}[slideDirection];
+   const translate=(x,y)=>`translate3d(${x}%,${y}%,0)`;
+   t.card.classList.add('push');
+   t.back.style.transform=translate(x,y);
+   const timing={duration,easing:'cubic-bezier(.42,.02,.21,.99)',fill:'both'};
+   const outgoing=t.front.animate([{transform:translate(0,0)},{transform:translate(-x,-y)}],timing);
+   const incoming=t.back.animate([{transform:translate(x,y)},{transform:translate(0,0)}],timing);
+   outgoing.startTime=incoming.startTime=document.timeline.currentTime;
+   t.pushAnimations=[outgoing,incoming];t.pushAnimations.forEach(a=>trackAnimation(a,[t]));
+   await Promise.all(t.pushAnimations.map(animation=>animation.finished));
+  }else if(effect==='slide'){
+   // Layer stack within the tile: the full-wall overlay stays above both;
+   // the incoming card is layer 2 and the stationary current cover is layer 3.
+   const startTransform={left:'translate3d(-100%,0,1px)',right:'translate3d(100%,0,1px)',up:'translate3d(0,-100%,1px)',down:'translate3d(0,100%,1px)'}[slideDirection];
+   t.front.style.zIndex='1';t.front.style.transform='translateZ(0)';t.back.style.zIndex='2';t.back.style.transition='none';
+   // Animate only the incoming cover. Keeping it 1px forward guarantees it
+   // layers over the stationary old cover from every entry direction.
+   const animation=t.back.animate(
+    [{transform:startTransform},{transform:'translate3d(0,0,1px)'}],
+    {duration:duration,easing:'cubic-bezier(.42,.02,.21,.99)',fill:'both'}
+   );
+   t.slideAnimation=animation;trackAnimation(animation,[t]);
+   await animation.finished;
+   if(token!==generation||!t.tile.isConnected)return;
+   t.first.src=next;await t.first.decode();
+   if(token!==generation||!t.tile.isConnected)return;
+   t.url=next;lastShown.set(next,++sequence);
+   t.back.style.transform='rotateY(180deg)';animation.cancel();t.slideAnimation=null;
+   t.back.style.zIndex='';t.front.style.zIndex='';t.front.style.transform='';
+  }else if(effect==='slideOut'){
+   const wallRect=wall.getBoundingClientRect(),from=t.tile.getBoundingClientRect(),to=neighbour.tile.getBoundingClientRect();
+   const inset=config.gap/2,old=document.createElement('div'),oldImage=new Image();
+   old.className='slide-out';oldImage.src=t.url;old.append(oldImage);
+   Object.assign(old.style,{left:(from.left-wallRect.left+inset)+'px',top:(from.top-wallRect.top+inset)+'px',width:(from.width-config.gap)+'px',height:(from.height-config.gap)+'px'});
+   // The outgoing card stays above both stationary tiles throughout travel.
+   await Promise.all([oldImage.decode(),t.second.decode()]);
+   if(token!==generation||paused||!t.tile.isConnected)return;
+   wall.append(old);slideOutOverlay=old;
+   await painted();
+   // Decode and expose the replacement underneath the outgoing old cover.
+   t.first.src=next;await t.first.decode();
+   if(token!==generation||!t.tile.isConnected)return;
+   const dx=to.left-from.left,dy=to.top-from.top;
+   const animation=old.animate([{transform:'translate3d(0,0,0)'},{transform:`translate3d(${dx}px,${dy}px,0)`}],{duration,easing:'cubic-bezier(.42,.02,.21,.99)',fill:'both'});
+   t.slideAnimation=animation;trackAnimation(animation,[t,neighbour]);await animation.finished;
+   if(token!==generation||!t.tile.isConnected)return;
+   // Hold the overlay at its final position while committing the same cover
+   // underneath it. Removing it before cancelling avoids a jump back home.
+   const moved=t.url;
+   neighbour.first.src=neighbour.second.src=moved;
+   await Promise.all([neighbour.first.decode(),neighbour.second.decode()]);
+   if(token!==generation||!t.tile.isConnected)return;
+   t.url=next;neighbour.url=moved;lastShown.set(next,++sequence);
+   await painted();
+  }else{
+   await turnCard(t,next,token,direction,duration);
+  }
+  if(token!==generation||!t.tile.isConnected)return;
+  if(effect!=='slide'&&effect!=='slideOut'){
+   if(effect==='push')await settleFlip(t,next,token);
+   if(token!==generation||!t.tile.isConnected)return;
+   t.url=next;lastShown.set(next,++sequence);
+  }
+  await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+  if(effect==='slide')t.back.style.transition='';else t.card.style.transition='';
+ }catch(e){bad.add(next)}finally{t.card.style.visibility='';t.flipPanel?.remove();t.flipAnimation?.cancel();t.flipPanel=null;t.flipAnimation=null;slideOutOverlay?.remove();t.pushAnimations?.forEach(animation=>animation.cancel());t.pushAnimations=null;t.card.classList.remove('push');if(t.settleCover){t.back.append(t.second);t.settleCover.remove();t.settleCover=null;}t.card.style.transition='none';t.slideAnimation?.cancel();t.slideAnimation=null;t.card.classList.remove('moving','horizontal','vertical','flip3d');t.back.style.transition='';t.back.style.transform='';t.back.style.zIndex='';t.front.style.zIndex='';t.front.style.transform='';t.card.style.transition='';reserved.delete(next);t.busy=false;if(neighbour)neighbour.busy=false;}
+}
+async function slideLine(axis){
+ if(paused||document.hidden||!tiles.length)return;
+ const token=generation,duration=config.duration;
+ const cols=wall.style.gridTemplateColumns.match(/repeat\((\d+)/)?.[1];
+ const columnCount=Number(cols)||Math.round(parseFloat(wall.style.width)/tiles[0].tile.offsetWidth);
+ const rowCount=tiles.length/columnCount,horizontal=axis==='row';
+ const groups=Array.from({length:horizontal?rowCount:columnCount},(_,i)=>tiles.filter((_,j)=>horizontal?Math.floor(j/columnCount)===i:j%columnCount===i)).filter(group=>group.length&&group.every(t=>!t.busy&&!t.hovered)&&group.some(t=>{const r=t.tile.getBoundingClientRect();return r.right>0&&r.left<innerWidth&&r.bottom>0&&r.top<innerHeight}));
+ if(!groups.length)return;
+ const group=groups[Math.floor(Math.random()*groups.length)];
+ const visible=new Set(tiles.map(t=>t.url));
+ const free=source.filter(url=>!visible.has(url)&&!reserved.has(url));
+ if(!free.length)return;
+ const oldest=Math.min(...free.map(url=>lastShown.get(url)||0));
+ const next=shuffled(free.filter(url=>(lastShown.get(url)||0)===oldest))[0];
+ const forward=Math.random()<.5,previous=group.map(t=>t.url);
+ const updated=forward?[next,...previous.slice(0,-1)]:[...previous.slice(1),next];
+ const ordered=forward?[next,...previous]:[...previous,next];
+ const size=group[0].tile.offsetWidth;
+ const viewport=document.createElement('div'),track=document.createElement('div');
+ viewport.className='line-window';track.className='line-track';
+ Object.assign(viewport.style,{left:group[0].tile.offsetLeft+'px',top:group[0].tile.offsetTop+'px',width:(horizontal?size*group.length:size)+'px',height:(horizontal?size:size*group.length)+'px'});
+ track.style.flexDirection=horizontal?'row':'column';
+ const images=ordered.map(url=>{const cell=document.createElement('div'),img=new Image();cell.className='line-cell';cell.style.width=cell.style.height=size+'px';img.src=url;cell.append(img);track.append(cell);return img});
+ group.forEach(t=>t.busy=true);reserved.add(next);
+ let animation;
+ try{
+  let timeout;
+  try{await Promise.race([Promise.all(images.map(img=>img.decode())),new Promise((_,reject)=>timeout=setTimeout(()=>reject(Error('decode timeout')),10000))])}finally{clearTimeout(timeout)}
+  if(token!==generation||paused||!group[0].tile.isConnected)return;
+  viewport.append(track);wall.append(viewport);
+  group.forEach((t,i)=>{t.hoverSurface=images[i+(forward?1:0)].parentElement;});
+  const translate=n=>horizontal?`translate3d(${n}px,0,0)`:`translate3d(0,${n}px,0)`;
+  animation=track.animate([{transform:translate(forward?-size:0)},{transform:translate(forward?0:-size)}],{duration,easing:'cubic-bezier(.42,.02,.21,.99)',fill:'both'});
+  trackAnimation(animation,group);await animation.finished;
+  if(token!==generation||!group[0].tile.isConnected)return;
+  // Decode replacement faces beneath the fully painted line before uncovering.
+  await Promise.all(group.map(async(t,i)=>{t.first.src=t.second.src=updated[i];await Promise.all([t.first.decode(),t.second.decode()])}));
+  if(token!==generation||!group[0].tile.isConnected)return;
+  group.forEach((t,i)=>{t.url=updated[i]});lastShown.set(next,++sequence);
+  await painted();
+ }catch(e){/* Retain the original line if a new cover cannot be decoded. */}
+ finally{animation?.cancel();viewport.remove();reserved.delete(next);group.forEach(t=>{t.busy=false;t.hoverSurface=null;})}
+}
+async function tick(manual=false){
+ if(roundRunning||paused||document.hidden||(!manual&&config.quiet))return;
+ clearTimeout(timer);roundRunning=true;
+ // Scale the movement budget to the currently rendered grid, with a little
+ // variation each round. In all-random mode a line is optional, never forced.
+ const allRandom=config.effect==='randomAll';
+ const tilesOnScreen=tiles.filter(t=>t.tile.isConnected).length;
+ let count=Math.max(1,Math.min(tilesOnScreen,Math.round(tilesOnScreen*config.transitionRatio*(.65+Math.random()*.7))));
+ let selected=config.effect;
+ if(allRandom)selected=Math.random()<.4?(Math.random()<.5?'rowSlide':'columnSlide'):'random';
+ const lineAxis=selected==='rowSlide'?'row':selected==='columnSlide'?'column':null;
+ let lineCount=0,lineLength=0;
+ if(lineAxis){
+  const cols=Number(wall.style.gridTemplateColumns.match(/repeat\((\d+)/)?.[1])||1;
+  const rows=Math.max(1,Math.floor(tilesOnScreen/cols));
+  lineLength=lineAxis==='row'?cols:rows;
+  const available=lineAxis==='row'?rows:cols;
+  if(allRandom)count=Math.min(tilesOnScreen,Math.max(count,lineLength+1));
+  lineCount=Math.min(available,Math.max(1,Math.round(count*.5/lineLength)));
+  if(allRandom)lineCount=Math.min(lineCount,Math.max(0,Math.floor((count-1)/lineLength)));
+ }
+ const singleCount=Math.max(0,count-lineCount*lineLength);
+ const effects=[];
+ while(effects.length<singleCount)effects.push(...shuffled(['flip3d','slide','push','slideOut']));
+ try{
+  const jobs=[];
+  if(lineAxis)jobs.push(...Array.from({length:lineCount},()=>slideLine(lineAxis)));
+  if(allRandom||selected==='random')jobs.push(...Array.from({length:singleCount},(_,i)=>flip(effects[i])));
+  else if(!lineAxis)jobs.push(...Array.from({length:singleCount},()=>flip(selected)));
+  await Promise.all(jobs);
+ }
+ finally{roundRunning=false;start()}
+}
+function start(){clearTimeout(timer);if(!roundRunning&&!paused&&!config.quiet&&!document.hidden)timer=setTimeout(()=>tick(),config.interval)}
+let toastTimer;
+function showToast(message){toast.textContent=message;toast.style.opacity='1';clearTimeout(toastTimer);toastTimer=setTimeout(()=>toast.style.opacity='0',1800)}
+addEventListener('keydown',e=>{
+ if(e.repeat)return;
+ if(e.code==='KeyQ'){config.quiet=!config.quiet;start();showToast(config.quiet?'安静模式已开启（按 Q 恢复自动切换）':'安静模式已关闭');return;}
+ if(e.code==='Space'){e.preventDefault();tick(true);}
+});
+window.albumWallLibraryUpdated=applyLibrary;
+window.wallpaperPropertyListener={
+ applyUserProperties(p){
+  let rebuild=false;
+  for(const [key,min,max] of [['rows',1,12],['interval',500,10000],['duration',300,1800],['gap',0,12],['edgeFade',0,100]]){
+   if(p[key]){const v=Number(p[key].value);if(Number.isFinite(v)){const next=Math.round(clamp(v,min,max));if(key==='rows'&&next!==config.rows)rebuild=true;config[key]=next;}}
+  }
+  if(p.transitionRatio){const value=Number(p.transitionRatio.value);if(Number.isFinite(value))config.transitionRatio=clamp(value,5,60)/100;}
+  if(p.quietMode){const value=p.quietMode.value;config.quiet=value===true||value===1||String(value).toLowerCase()==='true';}
+  if(p.flipDirection){
+   const value=String(p.flipDirection.value),modes={
+    horizontalFlip:['horizontal','flip3d'],verticalFlip:['vertical','flip3d'],
+    horizontalSlide:['horizontal','slide'],verticalSlide:['vertical','slide'],slideRandom:['random','slide'],
+    random:['random','slide'],randomMix:['random','random'],
+    0:['horizontal','flip3d'],1:['vertical','flip3d'],2:['random','slide']
+   };
+   [config.direction,config.effect]=modes[value]||['horizontal','flip3d'];
+  }
+  if(p.transitionEffect&&['flip3d','slide','push','slideOut','random','rowSlide','columnSlide','randomAll'].includes(p.transitionEffect.value))config.effect=p.transitionEffect.value;
+  if(p.transitionDirection&&['horizontal','vertical','random'].includes(p.transitionDirection.value))config.direction=p.transitionDirection.value;
+  if(p.albumfolder&&p.albumfolder.value!==folder){folder=p.albumfolder.value||'';directory.clear();applyLibrary()}
+  appearance();if(rebuild)render();start();
+ },
+ userDirectoryFilesAddedOrChanged(name,files){if(name!=='albumfolder')return;for(const file of files)directory.set(file,fileUrl(file));applyLibrary()},
+ userDirectoryFilesRemoved(name,files){if(name!=='albumfolder')return;for(const file of files)directory.delete(file);applyLibrary()},
+ setPaused(value){paused=value;start()}
+};
+addEventListener('visibilitychange',start);
+addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(render,150)});
+setInterval(()=>{const script=document.createElement('script');script.src='covers.js?v='+Date.now();script.onload=script.onerror=()=>script.remove();document.head.append(script)},30000);
+applyLibrary();start();
+})();</script></body></html>

@@ -1,0 +1,12 @@
+# Local runtimes, caches, credentials, and platform exports
+.venv/
+.local/
+__pycache__/
+*.py[cod]
+Imports/
+Sync/
+**/browser.json
+**/auth.json
+**/.env
+**/.env.*
+**/*credentials*

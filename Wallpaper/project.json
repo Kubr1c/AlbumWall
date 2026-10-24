@@ -1,0 +1,131 @@
+{
+  "file": "index.html",
+  "title": "AlbumWall v3 · Local Album Collection",
+  "type": "web",
+  "description": "本地可编辑专辑清单，完整方格、同屏不重复、随机 3D 翻转。独立复刻，非苹果原版。",
+  "general": {
+    "properties": {
+      "albumfolder": {
+        "order": 1,
+        "text": "素材 · 封面目录",
+        "type": "directory",
+        "mode": "fetchall",
+        "value": ""
+      },
+      "rows": {
+        "order": 2,
+        "text": "布局 · 行数",
+        "type": "slider",
+        "value": 5,
+        "min": 1,
+        "max": 12
+      },
+      "interval": {
+        "order": 6,
+        "text": "节奏 · 停留时间（毫秒）",
+        "type": "slider",
+        "value": 2800,
+        "min": 500,
+        "max": 10000
+      },
+      "duration": {
+        "order": 7,
+        "text": "节奏 · 动画时长（毫秒）",
+        "type": "slider",
+        "value": 870,
+        "min": 300,
+        "max": 1800
+      },
+      "gap": {
+        "order": 3,
+        "text": "布局 · 封面间距",
+        "type": "slider",
+        "value": 2,
+        "min": 0,
+        "max": 12
+      },
+      "quietMode": {
+        "order": 10,
+        "text": "控制 · 暂停自动切换",
+        "type": "checkbox",
+        "value": false
+      },
+      "edgeFade": {
+        "order": 9,
+        "text": "外观 · 边缘暗化",
+        "type": "slider",
+        "value": 0,
+        "min": 0,
+        "max": 100
+      },
+      "transitionEffect": {
+        "order": 4,
+        "text": "动效 · 效果",
+        "type": "combo",
+        "value": "randomAll",
+        "options": [
+          {
+            "value": "flip3d",
+            "label": "3D 翻转"
+          },
+          {
+            "value": "slide",
+            "label": "滑动覆盖"
+          },
+          {
+            "value": "slideOut",
+            "label": "单格滑离（四向，露出新封面）"
+          },
+          {
+            "value": "push",
+            "label": "滑动推移（新旧同步）"
+          },
+          {
+            "value": "random",
+            "label": "随机单格混合（四种）"
+          },
+          {
+            "value": "rowSlide",
+            "label": "整行滑动（左右随机）"
+          },
+          {
+            "value": "columnSlide",
+            "label": "整列滑动（上下随机）"
+          },
+          {
+            "value": "randomAll",
+            "label": "全部随机（单格 + 整行/整列）"
+          }
+        ]
+      },
+      "transitionDirection": {
+        "order": 5,
+        "text": "动效 · 方向",
+        "type": "combo",
+        "value": "random",
+        "options": [
+          {
+            "value": "horizontal",
+            "label": "左右"
+          },
+          {
+            "value": "vertical",
+            "label": "上下"
+          },
+          {
+            "value": "random",
+            "label": "随机方向"
+          }
+        ]
+      },
+      "transitionRatio": {
+        "order": 8,
+        "text": "节奏 · 每轮切换比例 (%)",
+        "type": "slider",
+        "value": 25,
+        "min": 5,
+        "max": 60
+      }
+    }
+  }
+}
